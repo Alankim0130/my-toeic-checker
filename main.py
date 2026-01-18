@@ -90,65 +90,11 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         s = pts.sum(axis=1); rect[0] = pts[np.argmin(s)]; rect[2] = pts[np.argmax(s)]
         diff = np.diff(pts, axis=1); rect[1] = pts[np.argmin(diff)]; rect[3] = pts[np.argmax(diff)]
         
+        # 1. 원근 변환 (강사님의 최적 비율 600x800)
         dst_w, dst_h = 600, 800 
         dst = np.array([[0, 0], [dst_w-1, 0], [dst_w-1, dst_h-1], [0, dst_h-1]], dtype="float32")
         M = cv2.getPerspectiveTransform(rect, dst)
         warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
         
-        # [복구] 기존에 완벽하게 작동하던 강제 회전 로직으로 복구
-        warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        
-        h, w = warped.shape[:2]
-        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        
-        # [복구] 임계값 150으로 복구
-        _, thresh = cv2.threshold(warped_gray, 150, 255, cv2.THRESH_BINARY_INV)
-
-        top_margin, row_spacing, bubble_width = h * 0.163, h * 0.0422, w * 0.034
-        left_margin = w * 0.080 if section_name == "RC" else w * 0.082
-        col_spacing = w * 0.196 if section_name == "RC" else w * 0.201
-
-        for col in range(5):
-            for row in range(20):
-                base_x = left_margin + (col * col_spacing)
-                base_y = top_margin + (row * row_spacing)
-                
-                pixel_counts = []
-                for j in range(4):
-                    cx, cy = int(base_x + (j * bubble_width)), int(base_y)
-                    mask = np.zeros(warped_gray.shape, dtype="uint8")
-                    cv2.circle(mask, (cx, cy), 6, 255, -1)
-                    pixel_counts.append(cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask)))
-
-                # [복구] 판독 기준 25로 복구
-                if max(pixel_counts) > 25:
-                    total_student_answers.append(labels[np.argmax(pixel_counts)])
-                else:
-                    total_student_answers.append("?")
-
-    parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
-                 ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
-    
-    lc_correct, rc_correct, part_details = 0, 0, []
-
-    for name, start, end in parts_def:
-        p_score, p_items = 0, []
-        for i in range(start-1, end):
-            if i >= len(total_student_answers): break
-            std = total_student_answers[i]
-            corr = (std == ANSWER_KEY[i])
-            if corr:
-                if i < 100: lc_correct += 1
-                else: rc_correct += 1
-                p_score += 1
-            p_items.append({"no": i+1, "std": std, "res": "O" if corr else "X"})
-        part_details.append({"name": name, "score": p_score, "total": end-start+1, "items": p_items})
-
-    return {
-        "lc_correct": lc_correct,
-        "rc_correct": rc_correct,
-        "lc_converted": lc_correct * 5,
-        "rc_converted": rc_correct * 5,
-        "total_converted": (lc_correct + rc_correct) * 5,
-        "part_details": part_details
-    }
+        # 2. 지능형 회전 (가로로 누운 사진일 때만 왼쪽으로 90도 회전)
+        if warped.shape
