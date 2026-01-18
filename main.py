@@ -34,9 +34,10 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
 
         ANSWER_KEY = ANSWERS_DB.get(vol.replace(".", ""), ANSWERS_DB["vol16"])
 
+        # 1. 전처리 및 테두리 검출
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edged = cv2.Canny(blurred, 30, 150)
+        edged = cv2.Canny(blurred, 75, 200)
 
         cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
@@ -45,15 +46,15 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         for c in cnts:
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            # 테두리 인식 면적 기준을 살짝 낮춰 인식률 확보
-            if len(approx) == 4 and cv2.contourArea(c) > 15000:
+            # 강사님 코드 기준 면적 50000 적용
+            if len(approx) == 4 and cv2.contourArea(c) > 50000:
                 target_regions.append(approx)
                 if len(target_regions) == 2: break
 
         if len(target_regions) < 2:
-            return {"error": "LC/RC 구역 인식 실패. 테두리가 잘 보이게 찍어주세요."}
+            return {"error": "답안지 구역 인식 실패. 테두리 안쪽이 다 보이게 찍어주세요."}
 
-        # 왼쪽(LC), 오른쪽(RC) 정렬
+        # LC -> RC 순서 보정
         target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
 
         total_student_answers = []
@@ -67,40 +68,42 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             s = pts.sum(axis=1); rect[0] = pts[np.argmin(s)]; rect[2] = pts[np.argmax(s)]
             diff = np.diff(pts, axis=1); rect[1] = pts[np.argmin(diff)]; rect[3] = pts[np.argmax(diff)]
             
-            # [핵심] 각각을 600x800으로 변환
+            # 강사님 최적 비율 600x800
             dst_w, dst_h = 600, 800 
             dst = np.array([[0, 0], [dst_w-1, 0], [dst_w-1, dst_h-1], [0, dst_h-1]], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
             
-            # --- [복구] 강제 회전 제거 (600x800 세로 상태 그대로 판독) ---
+            # [강사님 필수 로직] 왼쪽으로 90도 회전
+            warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
-            w_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(w_gray, 150, 255, cv2.THRESH_BINARY_INV)
 
-            # --- 강사님 황금 좌표 (600x800 기준) ---
+            # --- 강사님 황금 좌표 셋팅 ---
             top_margin = h * 0.163
             row_spacing = h * 0.0422
             
             if section_name == "RC":
                 left_margin = w * 0.080 
-                col_spacing = w * 0.196 
-                bubble_w = w * 0.033
+                current_col_spacing = w * 0.196 # 밀림 방지 핵심 수치
+                current_bubble_width = w * 0.033
             else:
                 left_margin = w * 0.082
-                col_spacing = w * 0.201
-                bubble_w = w * 0.034
+                current_col_spacing = w * 0.201
+                current_bubble_width = w * 0.034
+
+            # 판독 준비 (임계값 160으로 살짝 상향)
+            warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
 
             for col in range(5):
                 for row in range(20):
-                    base_x = left_margin + (col * col_spacing)
+                    base_x = left_margin + (col * current_col_spacing)
                     base_y = top_margin + (row * row_spacing)
                     
                     pixel_counts = []
                     for j in range(4):
-                        cx, cy = int(base_x + (j * bubble_w)), int(base_y)
+                        cx, cy = int(base_x + (j * current_bubble_width)), int(base_y)
                         
-                        # 좌표 안전성 체크
                         if cx < 0 or cx >= w or cy < 0 or cy >= h:
                             pixel_counts.append(0)
                             continue
@@ -114,7 +117,7 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                     else:
                         total_student_answers.append("?")
 
-        # 결과 리턴 로직
+        # --- 점수 계산 및 결과 리턴 ---
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
