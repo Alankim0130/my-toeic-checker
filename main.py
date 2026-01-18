@@ -72,20 +72,26 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # --- [긴급 좌표 수정 구간] ---
+            # --- 강사님의 황금 좌표 적용 ---
+            left_margin = w * 0.082
+            top_margin = h * 0.163
+            col_spacing = w * 0.201
+            row_spacing = h * 0.0422
+            bubble_width = w * 0.034
+
+            # RC 영역일 때만 실행되는 보정 로직
             if section_name == "RC":
-                # 181번~200번 밀림 해결을 위해 가로/세로 수치 미세 조정
-                left_margin = w * 0.082 # 시작점을 0.081에서 0.082로 살짝 오른쪽으로
-                top_margin = h * 0.162
-                current_col_spacing = w * 0.197 # 0.1955에서 0.197로 확장 (오른쪽 열들이 더 오른쪽으로 감)
-                row_spacing = h * 0.0422 # 다시 0.0422로 복구 (세로 밀림 방지)
-                current_bubble_width = w * 0.034
+                  # 1. 시작점(101번)을 아주 살짝 왼쪽으로 당김
+                  left_margin = w * 0.080
+
+                  # 2. 열 간격을 좁혀서 오른쪽으로 갈수록 밀리는 현상 방지
+                  # 0.201에서 0.198로 줄여서 5번째 열이 안쪽으로 들어오게 합니다.
+                  current_col_spacing = w * 0.196
+                  bubble_width = w * 0.033
             else:
-                left_margin = w * 0.082
-                top_margin = h * 0.163
-                current_col_spacing = w * 0.201
-                row_spacing = h * 0.0422
-                current_bubble_width = w * 0.034
+                  # LC는 원래 잘 맞던 수치 그대로 유지
+                  left_margin = w * 0.082
+                  current_col_spacing = w * 0.201
 
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
@@ -135,3 +141,4 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         }
     except Exception as e:
         return {"error": f"서버 오류: {str(e)}"}
+
