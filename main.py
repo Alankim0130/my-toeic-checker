@@ -1,12 +1,12 @@
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import io
 
 app = FastAPI()
 
-# 아임웹과의 통신을 허용하는 설정
+# 아임웹과의 통신 허용 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,15 +14,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- [강사님 확인!] 테스트용 정답지 (나중에 실제 정답으로 수정하세요) ---
-ANSWER_KEY = (["A", "B", "C", "D"] * 50)  # 200번까지 A,B,C,D 반복 (임시)
+# --- [강사님 필독! 회차별 정답지 설정] ---
+# 실제 정답에 맞춰 알파벳을 수정하세요.
+ANSWERS_DB = {
+    "vol16": ["A", "B", "C", "D"] * 50, # vol16 실제 정답 200개
+    "vol17": ["B", "C", "D", "A"] * 50, # vol17 실제 정답 200개
+}
 
 @app.get("/")
 def home():
     return "TOEIC AI Server is Running!"
 
 @app.post("/analyze")
-async def analyze_image(file: UploadFile = File(...)):
+async def analyze_image(
+    file: UploadFile = File(...), 
+    vol: str = Form(...)  # 아임웹에서 보낸 회차 정보를 여기서 받습니다.
+):
     # 1. 이미지 읽기
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
@@ -31,12 +38,15 @@ async def analyze_image(file: UploadFile = File(...)):
     if image is None:
         return {"error": "이미지를 읽을 수 없습니다."}
 
-    # 2. 전처리
+    # 2. 선택된 회차의 정답지 가져오기
+    # 아임웹에서 보낸 vol 값이 ANSWERS_DB에 없으면 vol16을 기본값으로 사용
+    ANSWER_KEY = ANSWERS_DB.get(vol, ANSWERS_DB["vol16"])
+
+    # 3. 이미지 전처리 및 구역(LC/RC) 찾기
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edged = cv2.Canny(blurred, 75, 200)
 
-    # 3. 테두리 찾기
     cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
 
@@ -50,17 +60,16 @@ async def analyze_image(file: UploadFile = File(...)):
 
     target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
 
-    if len(target_regions) == 0:
-        return {"error": "답안지 구역(LC/RC)을 찾지 못했습니다."}
+    if len(target_regions) < 2:
+        return {"error": "답안지 구역(LC/RC)을 모두 찾지 못했습니다. 사진을 다시 찍어주세요."}
 
     total_student_answers = []
     labels = ["A", "B", "C", "D"]
 
-    # 4. 각 구역(LC, RC) 분석
+    # 4. 각 구역(LC, RC) 마킹 판독
     for idx, region in enumerate(target_regions):
         section_name = "LC" if idx == 0 else "RC"
         
-        # ROI 추출 및 정렬
         pts = region.reshape(4, 2)
         rect = np.zeros((4, 2), dtype="float32")
         s = pts.sum(axis=1); rect[0] = pts[np.argmin(s)]; rect[2] = pts[np.argmax(s)]
@@ -76,19 +85,11 @@ async def analyze_image(file: UploadFile = File(...)):
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
 
-        # 강사님의 황금 좌표 적용
-        top_margin = h * 0.163
-        row_spacing = h * 0.0422
-        bubble_width = w * 0.034
-        
-        if section_name == "RC":
-            left_margin = w * 0.080
-            col_spacing = w * 0.196
-        else:
-            left_margin = w * 0.082
-            col_spacing = w * 0.201
+        # 좌표 설정
+        top_margin, row_spacing, bubble_width = h * 0.163, h * 0.0422, w * 0.034
+        left_margin = w * 0.080 if section_name == "RC" else w * 0.082
+        col_spacing = w * 0.196 if section_name == "RC" else w * 0.201
 
-        # 100문항 순회
         for col in range(5):
             for row in range(20):
                 base_x = left_margin + (col * col_spacing)
@@ -99,21 +100,36 @@ async def analyze_image(file: UploadFile = File(...)):
                     cx, cy = int(base_x + (j * bubble_width)), int(base_y)
                     mask = np.zeros(warped_gray.shape, dtype="uint8")
                     cv2.circle(mask, (cx, cy), 6, 255, -1)
-                    count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
-                    pixel_counts.append(count)
+                    pixel_counts.append(cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask)))
 
                 if max(pixel_counts) > 25:
                     total_student_answers.append(labels[np.argmax(pixel_counts)])
                 else:
                     total_student_answers.append("?")
 
-    # 5. 채점 및 결과 반환
-    score = 0
-    results = []
-    for i in range(len(total_student_answers)):
-        std_ans = total_student_answers[i]
-        is_correct = (std_ans == ANSWER_KEY[i])
-        if is_correct: score += 1
-        results.append({"no": i+1, "student": std_ans, "result": "O" if is_correct else "X"})
+    # 5. 파트별 세분화 채점 로직
+    parts_def = [
+        ("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
+        ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)
+    ]
+    
+    total_score = 0
+    part_details = []
+    for name, start, end in parts_def:
+        p_score, p_items = 0, []
+        for i in range(start-1, end):
+            if i >= len(total_student_answers): break
+            std = total_student_answers[i]
+            corr = (std == ANSWER_KEY[i])
+            if corr: 
+                total_score += 1
+                p_score += 1
+            p_items.append({"no": i+1, "std": std, "res": "O" if corr else "X"})
+        part_details.append({
+            "name": name, 
+            "score": p_score, 
+            "total": end-start+1, 
+            "items": p_items
+        })
 
-    return {"total_score": score, "results": results}
+    return {"total_score": total_score, "part_details": part_details}
