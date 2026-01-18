@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-from google.colab import files
 from matplotlib import pyplot as plt
 
 # 1. 파일 업로드
@@ -129,3 +128,4 @@ else:
             print("-" * 50)
     else:
         print("❌ 테두리를 찾지 못했습니다. LC/RC 구역이 다 나오게 찍어주세요.")
+
