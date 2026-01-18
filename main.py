@@ -34,6 +34,7 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
 
         ANSWER_KEY = ANSWERS_DB.get(vol.replace(".", ""), ANSWERS_DB["vol16"])
 
+        # 1. 전처리 및 테두리 검출
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         edged = cv2.Canny(blurred, 75, 200)
@@ -45,12 +46,12 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         for c in cnts:
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            if len(approx) == 4 and cv2.contourArea(c) > 30000: # 인식률 위해 면적 살짝 조정
+            if len(approx) == 4 and cv2.contourArea(c) > 30000:
                 target_regions.append(approx)
                 if len(target_regions) == 2: break
 
         if len(target_regions) < 2:
-            return {"error": "구역 인식 실패. 테두리가 선명한지 확인해 주세요."}
+            return {"error": "구역 인식 실패. 테두리를 확인해 주세요."}
 
         target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
         total_student_answers = []
@@ -71,15 +72,14 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # --- [RC 정밀 교정 구간] ---
+            # --- [긴급 좌표 수정 구간] ---
             if section_name == "RC":
-                # 가로 밀림 방지: 간격을 0.196에서 0.1955로 미세 축소
-                # 세로 밀림 방지: row_spacing을 0.0422에서 0.0420으로 미세 축소
-                left_margin = w * 0.081
-                top_margin = h * 0.162 # 시작점을 아주 미세하게 위로
-                current_col_spacing = w * 0.1955
-                row_spacing = h * 0.0420
-                current_bubble_width = w * 0.0335
+                # 181번~200번 밀림 해결을 위해 가로/세로 수치 미세 조정
+                left_margin = w * 0.082 # 시작점을 0.081에서 0.082로 살짝 오른쪽으로
+                top_margin = h * 0.162
+                current_col_spacing = w * 0.197 # 0.1955에서 0.197로 확장 (오른쪽 열들이 더 오른쪽으로 감)
+                row_spacing = h * 0.0422 # 다시 0.0422로 복구 (세로 밀림 방지)
+                current_bubble_width = w * 0.034
             else:
                 left_margin = w * 0.082
                 top_margin = h * 0.163
@@ -110,7 +110,7 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                     else:
                         total_student_answers.append("?")
 
-        # --- 점수 및 상세 결과 ---
+        # --- 결과 처리 ---
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
