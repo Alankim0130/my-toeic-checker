@@ -6,7 +6,7 @@ import io
 
 app = FastAPI()
 
-# 1. 아임웹과의 통신 허용 설정 (보강됨)
+# 1. 아임웹과의 통신 허용 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,7 +18,7 @@ app.add_middleware(
 
 # --- [정답지 설정] ---
 ANSWERS_DB = {
-    "vol16": [ # 아임웹에서 "vol16"으로 보내므로 키값을 맞췄습니다.
+    "vol16": [
         "C","C","D","A","C","A","B","A","C","A","C","C","A","C","A","B","B","C","A","C",
         "A","A","A","C","A","A","B","A","B","A","A","C","B","A","B","B","A","C","D","C",
         "B","D","C","C","D","A","A","C","B","C","C","A","D","C","D","C","B","D","C","A",
@@ -50,7 +50,6 @@ def home():
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
-    # 1. 이미지 읽기
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -58,14 +57,12 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
     if image is None:
         return {"error": "이미지를 읽을 수 없습니다."}
 
-    # 2. 선택된 회차의 정답지 가져오기 (키값 매칭 보정)
-    clean_vol = vol.replace(".", "") # "vol.16" -> "vol16"
+    clean_vol = vol.replace(".", "")
     ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
 
-    # 3. 이미지 전처리
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, 50, 150) # Canny 범위 소폭 조정
+    edged = cv2.Canny(blurred, 50, 150)
 
     cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
@@ -74,20 +71,18 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
     for c in cnts:
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4 and cv2.contourArea(c) > 30000: # 최소 영역 소폭 완화
+        if len(approx) == 4 and cv2.contourArea(c) > 30000:
             target_regions.append(approx)
             if len(target_regions) == 2: break
 
     if len(target_regions) < 2:
         return {"error": "답안지 구역을 찾지 못했습니다. 밝은 곳에서 테두리가 잘 보이게 찍어주세요."}
 
-    # 왼쪽 구역부터 정렬
     target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
 
     total_student_answers = []
     labels = ["A", "B", "C", "D"]
 
-    # 4. 판독
     for idx, region in enumerate(target_regions):
         section_name = "LC" if idx == 0 else "RC"
         pts = region.reshape(4, 2)
@@ -100,13 +95,13 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         M = cv2.getPerspectiveTransform(rect, dst)
         warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
         
-        # 가로로 찍힌 경우 자동으로 똑바로 세우기
-        if warped.shape[1] > warped.shape[0]:
-            warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # [복구] 기존에 완벽하게 작동하던 강제 회전 로직으로 복구
+        warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
         h, w = warped.shape[:2]
         warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        # 조명 차이에 강한 Adaptive Threshold 사용 권장 (또는 현재값 유지)
+        
+        # [복구] 임계값 150으로 복구
         _, thresh = cv2.threshold(warped_gray, 150, 255, cv2.THRESH_BINARY_INV)
 
         top_margin, row_spacing, bubble_width = h * 0.163, h * 0.0422, w * 0.034
@@ -122,15 +117,15 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                 for j in range(4):
                     cx, cy = int(base_x + (j * bubble_width)), int(base_y)
                     mask = np.zeros(warped_gray.shape, dtype="uint8")
-                    cv2.circle(mask, (cx, cy), 7, 255, -1) # 원 크기 소폭 확대
+                    cv2.circle(mask, (cx, cy), 6, 255, -1)
                     pixel_counts.append(cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask)))
 
-                if max(pixel_counts) > 20: # 판독 기준 소폭 완화
+                # [복구] 판독 기준 25로 복구
+                if max(pixel_counts) > 25:
                     total_student_answers.append(labels[np.argmax(pixel_counts)])
                 else:
                     total_student_answers.append("?")
 
-    # 5. 파트별 채점
     parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                  ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
     
