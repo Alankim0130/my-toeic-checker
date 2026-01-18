@@ -17,8 +17,50 @@ app.add_middleware(
 # --- [강사님 필독! 회차별 정답지 설정] ---
 # 실제 정답에 맞춰 알파벳을 수정하세요.
 ANSWERS_DB = {
-    "vol16": ["A", "B", "C", "D"] * 50, # vol16 실제 정답 200개
-    "vol17": ["B", "C", "D", "A"] * 50, # vol17 실제 정답 200개
+    "vol.16": [
+    "C","C","D","A","C","A","B","A","C","A",
+    "C","C","A","C","A","B","B","C","A","C",
+    "A","A","A","C","A","A","B","A","B","A",
+    "A","C","B","A","B","B","A","C","D","C",
+    "B","D","C","C","D","A","A","C","B","C",
+    "C","A","D","C","D","C","B","D","C","A",
+    "A","B","C","A","C","B","C","B","D","D",
+    "D","C","A","C","B","D","C","B","A","D",
+    "B","B","B","A","B","B","D","A","B","A",
+    "D","C","C","D","C","A","C","D","C","A",
+    "B","B","A","A","A","D","C","B","C","B",
+    "C","D","B","B","D","A","D","B","D","B",
+    "C","C","D","D","A","C","C","D","D","D",
+    "C","B","A","D","D","B","C","A","B","D",
+    "A","D","C","B","A","A","A","C","A","A",
+    "A","D","D","A","B","D","C","A","B","C",
+    "B","C","A","D","D","C","D","D","A","A",
+    "A","C","D","D","A","B","A","C","C","D",
+    "C","B","C","B","C","D","C","A","B","D",
+    "B","A","A","B","D","C","A","B","B","D"
+  ], # vol16 실제 정답 200개
+    "vol.17": [
+    "D","A","A","B","C","A","C","B","C","B",
+    "C","B","B","C","B","A","B","B","A","B",
+    "B","B","C","B","A","C","B","A","B","B",
+    "A","C","B","A","D","A","A","B","C","D",
+    "B","C","A","A","D","C","D","B","C","B",
+    "A","C","A","B","B","C","B","D","D","C",
+    "A","A","D","D","D","C","A","B","A","B",
+    "A","C","B","A","B","C","D","C","B","D",
+    "C","A","B","C","A","D","C","C","B","C",
+    "D","D","C","A","C","B","D","D","C","C",
+    "C","A","D","C","A","A","B","D","B","D",
+    "B","A","C","B","D","A","B","C","A","A",
+    "B","D","B","C","B","C","A","D","C","C",
+    "A","A","D","D","A","B","B","C","B","C",
+    "A","C","D","C","D","C","D","B","D","A",
+    "D","A","D","C","C","A","C","C","D","B",
+    "C","B","D","A","C","D","B","C","D","C",
+    "A","C","B","A","B","B","D","B","A","C",
+    "B","D","D","C","C","A","C","A","B","D",
+    "A","B","B","A","D","C","A","C","B","A"
+  ], # vol17 실제 정답 200개
 }
 
 @app.get("/")
@@ -114,7 +156,10 @@ async def analyze_image(
     ]
     
     total_score = 0
+    lc_correct = 0
+    rc_correct = 0
     part_details = []
+
     for name, start, end in parts_def:
         p_score, p_items = 0, []
         for i in range(start-1, end):
@@ -124,7 +169,12 @@ async def analyze_image(
             if corr: 
                 total_score += 1
                 p_score += 1
+                # 1~100번은 LC, 101~200번은 RC로 카운트
+                if i < 100: lc_correct += 1
+                else: rc_correct += 1
+                
             p_items.append({"no": i+1, "std": std, "res": "O" if corr else "X"})
+        
         part_details.append({
             "name": name, 
             "score": p_score, 
@@ -132,4 +182,19 @@ async def analyze_image(
             "items": p_items
         })
 
-    return {"total_score": total_score, "part_details": part_details}
+    # 토익 점수 환산 (단순 5점 가점 방식)
+    lc_converted = lc_correct * 5
+    rc_converted = rc_correct * 5
+    total_converted = lc_converted + rc_converted
+
+    # 아임웹으로 보낼 데이터 꾸러미
+    return {
+        "total_score": total_score,
+        "lc_correct": lc_correct,
+        "rc_correct": rc_correct,
+        "lc_converted": lc_converted,
+        "rc_converted": rc_converted,
+        "total_converted": total_converted,
+        "part_details": part_details
+    }
+
