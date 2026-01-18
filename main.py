@@ -34,7 +34,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
 
         ANSWER_KEY = ANSWERS_DB.get(vol.replace(".", ""), ANSWERS_DB["vol16"])
 
-        # 1. 전처리 및 테두리 검출
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         edged = cv2.Canny(blurred, 75, 200)
@@ -46,17 +45,14 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         for c in cnts:
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            # 강사님 코드 기준 면적 50000 적용
-            if len(approx) == 4 and cv2.contourArea(c) > 50000:
+            if len(approx) == 4 and cv2.contourArea(c) > 30000: # 인식률 위해 면적 살짝 조정
                 target_regions.append(approx)
                 if len(target_regions) == 2: break
 
         if len(target_regions) < 2:
-            return {"error": "답안지 구역 인식 실패. 테두리 안쪽이 다 보이게 찍어주세요."}
+            return {"error": "구역 인식 실패. 테두리가 선명한지 확인해 주세요."}
 
-        # LC -> RC 순서 보정
         target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
-
         total_student_answers = []
         labels = ["A", "B", "C", "D"]
 
@@ -68,30 +64,29 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             s = pts.sum(axis=1); rect[0] = pts[np.argmin(s)]; rect[2] = pts[np.argmax(s)]
             diff = np.diff(pts, axis=1); rect[1] = pts[np.argmin(diff)]; rect[3] = pts[np.argmax(diff)]
             
-            # 강사님 최적 비율 600x800
             dst_w, dst_h = 600, 800 
             dst = np.array([[0, 0], [dst_w-1, 0], [dst_w-1, dst_h-1], [0, dst_h-1]], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
-            
-            # [강사님 필수 로직] 왼쪽으로 90도 회전
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # --- 강사님 황금 좌표 셋팅 ---
-            top_margin = h * 0.163
-            row_spacing = h * 0.0422
-            
+            # --- [RC 정밀 교정 구간] ---
             if section_name == "RC":
-                left_margin = w * 0.080 
-                current_col_spacing = w * 0.196 # 밀림 방지 핵심 수치
-                current_bubble_width = w * 0.033
+                # 가로 밀림 방지: 간격을 0.196에서 0.1955로 미세 축소
+                # 세로 밀림 방지: row_spacing을 0.0422에서 0.0420으로 미세 축소
+                left_margin = w * 0.081
+                top_margin = h * 0.162 # 시작점을 아주 미세하게 위로
+                current_col_spacing = w * 0.1955
+                row_spacing = h * 0.0420
+                current_bubble_width = w * 0.0335
             else:
                 left_margin = w * 0.082
+                top_margin = h * 0.163
                 current_col_spacing = w * 0.201
+                row_spacing = h * 0.0422
                 current_bubble_width = w * 0.034
 
-            # 판독 준비 (임계값 160으로 살짝 상향)
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
 
@@ -103,21 +98,19 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                     pixel_counts = []
                     for j in range(4):
                         cx, cy = int(base_x + (j * current_bubble_width)), int(base_y)
-                        
-                        if cx < 0 or cx >= w or cy < 0 or cy >= h:
+                        if 0 <= cx < w and 0 <= cy < h:
+                            mask = np.zeros((h, w), dtype="uint8")
+                            cv2.circle(mask, (cx, cy), 6, 255, -1)
+                            pixel_counts.append(cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask)))
+                        else:
                             pixel_counts.append(0)
-                            continue
-
-                        mask = np.zeros((h, w), dtype="uint8")
-                        cv2.circle(mask, (cx, cy), 6, 255, -1)
-                        pixel_counts.append(cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask)))
 
                     if max(pixel_counts) > 25:
                         total_student_answers.append(labels[np.argmax(pixel_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # --- 점수 계산 및 결과 리턴 ---
+        # --- 점수 및 상세 결과 ---
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
