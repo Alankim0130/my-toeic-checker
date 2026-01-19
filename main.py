@@ -98,22 +98,42 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                     else:
                         total_student_answers.append("?")
 
-        # 결과 처리
+        # --- [수정된 결과 처리 섹션] ---
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
+        
         for name, start, end in parts_def:
             p_score, p_items = 0, []
             for i in range(start-1, end):
                 if i >= len(total_student_answers): break
-                std = total_student_answers[i]; corr = (std == ANSWER_KEY[i])
+                
+                std = total_student_answers[i]    # 학생이 쓴 답
+                ans = ANSWER_KEY[i]              # 실제 정답
+                corr = (std == ans)
+                
                 if corr:
                     if i < 100: lc_correct += 1
                     else: rc_correct += 1
                     p_score += 1
-                p_items.append({"no": i+1, "std": std, "res": "O" if corr else "X"})
+                
+                # 결과 리스트에 정답(ans)을 추가하여 전달합니다.
+                p_items.append({
+                    "no": i+1, 
+                    "std": std, 
+                    "ans": ans,                  # 정답 데이터 추가
+                    "res": "O" if corr else "X"
+                })
             part_details.append({"name": name, "score": p_score, "total": end-start+1, "items": p_items})
 
-        return {"lc_correct": lc_correct, "rc_correct": rc_correct, "lc_converted": lc_correct * 5, "rc_converted": rc_correct * 5, "total_converted": (lc_correct + rc_correct) * 5, "part_details": part_details}
+        return {
+            "lc_correct": lc_correct, 
+            "rc_correct": rc_correct, 
+            "lc_converted": lc_correct * 5, 
+            "rc_converted": rc_correct * 5, 
+            "total_converted": (lc_correct + rc_correct) * 5, 
+            "part_details": part_details
+        }
     except Exception as e:
         return {"error": f"분석 오류: {str(e)}"}
+
