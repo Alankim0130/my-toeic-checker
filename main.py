@@ -29,6 +29,7 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         
         ANSWER_KEY = ANSWERS_DB.get(vol.replace(".", ""), ANSWERS_DB["vol16"])
 
+        # 1. 전처리
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         edged = cv2.Canny(blurred, 75, 200)
@@ -50,7 +51,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
 
         for idx, region in enumerate(target_regions):
             section_name = "LC" if idx == 0 else "RC"
-            
             pts = region.reshape(4, 2)
             rect = np.zeros((4, 2), dtype="float32")
             s = pts.sum(axis=1); rect[0] = pts[np.argmin(s)]; rect[2] = pts[np.argmax(s)]
@@ -63,54 +63,46 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # --- [강사님 코드 100% 복사 수동 설정 구간] ---
+            # 강사님 황금 수치
             if section_name == "RC":
-                left_margin = w * 0.080
-                current_col_spacing = w * 0.196
-                bubble_width = w * 0.033
+                left_margin, current_col_spacing, bubble_width = w*0.080, w*0.196, w*0.033
             else:
-                left_margin = w * 0.082
-                current_col_spacing = w * 0.201
-                bubble_width = w * 0.034
-                
-            top_margin = h * 0.163
-            row_spacing = h * 0.0422
-            # ----------------------------------------------
+                left_margin, current_col_spacing, bubble_width = w*0.082, w*0.201, w*0.034
+            top_margin, row_spacing = h*0.163, h*0.0422
 
+            # --- [판독력 강화 전처리] ---
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
+            # 고정 임계값 대신 Otsu 이진화를 사용하여 최적의 명암비를 자동으로 찾음
+            _, thresh = cv2.threshold(warped_gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
             for col in range(5):
                 for row in range(20):
-                    # 좌표 계산 로직을 강사님 테스트 코드와 완전히 동일하게 수정
                     base_x = left_margin + (col * current_col_spacing)
                     base_y = top_margin + (row * row_spacing)
                     
                     pixel_counts = []
                     for j in range(4):
                         cx, cy = int(base_x + (j * bubble_width)), int(base_y)
-                        
                         mask = np.zeros((h, w), dtype="uint8")
-                        cv2.circle(mask, (cx, cy), 6, 255, -1)
+                        cv2.circle(mask, (cx, cy), 7, 255, -1) # 원 크기를 살짝 키움 (7)
                         pixel_count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         pixel_counts.append(pixel_count)
 
-                    if max(pixel_counts) > 25:
+                    # 기준치를 15로 낮춰서 아주 연한 마킹도 잡아내도록 설정
+                    if max(pixel_counts) > 15:
                         total_student_answers.append(labels[np.argmax(pixel_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # 결과 처리
+        # 결과 처리 (동일)
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
-
         for name, start, end in parts_def:
             p_score, p_items = 0, []
             for i in range(start-1, end):
                 if i >= len(total_student_answers): break
-                std = total_student_answers[i]
-                corr = (std == ANSWER_KEY[i])
+                std = total_student_answers[i]; corr = (std == ANSWER_KEY[i])
                 if corr:
                     if i < 100: lc_correct += 1
                     else: rc_correct += 1
@@ -118,10 +110,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                 p_items.append({"no": i+1, "std": std, "res": "O" if corr else "X"})
             part_details.append({"name": name, "score": p_score, "total": end-start+1, "items": p_items})
 
-        return {
-            "lc_correct": lc_correct, "rc_correct": rc_correct,
-            "lc_converted": lc_correct * 5, "rc_converted": rc_correct * 5,
-            "total_converted": (lc_correct + rc_correct) * 5, "part_details": part_details
-        }
+        return {"lc_correct": lc_correct, "rc_correct": rc_correct, "lc_converted": lc_correct * 5, "rc_converted": rc_correct * 5, "total_converted": (lc_correct + rc_correct) * 5, "part_details": part_details}
     except Exception as e:
-        return {"error": f"서버 오류: {str(e)}"}
+        return {"error": str(e)}
