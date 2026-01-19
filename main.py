@@ -126,14 +126,27 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                 })
             part_details.append({"name": name, "score": p_score, "total": end-start+1, "items": p_items})
 
+        # --- [수정된 점수 환산 로직 적용] ---
+        
+        # 1. LC 환산: (개수 * 5) + 10점 가산, 최대 495점 제한
+        # 단, 0개 맞았을 때는 0점으로 표시 (기본 점수 5점이 필요하면 0 대신 5 설정 가능)
+        lc_converted = min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0
+        
+        # 2. RC 환산: (개수 * 5), 최대 495점 제한
+        rc_converted = min(rc_correct * 5, 495)
+        
+        # 3. 총합 계산
+        total_converted = lc_converted + rc_converted
+
         return {
             "lc_correct": lc_correct, 
             "rc_correct": rc_correct, 
-            "lc_converted": lc_correct * 5, 
-            "rc_converted": rc_correct * 5, 
-            "total_converted": (lc_correct + rc_correct) * 5, 
+            "lc_converted": lc_converted, 
+            "rc_converted": rc_converted, 
+            "total_converted": total_converted, 
             "part_details": part_details
         }
     except Exception as e:
         return {"error": f"분석 오류: {str(e)}"}
+
 
