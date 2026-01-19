@@ -15,11 +15,14 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-# ... (ANSWERS_DB 부분은 생략, 기존 코드 그대로 유지하세요) ...
 ANSWERS_DB = {
     "vol16": ["C","C","D","A","C","A","B","A","C","A","C","C","A","C","A","B","B","C","A","C","A","A","A","C","A","A","B","A","B","A","A","C","B","A","B","B","A","C","D","C","B","D","C","C","D","A","A","C","B","C","C","A","D","C","D","C","B","D","C","A","A","B","C","A","C","B","C","B","D","D","D","C","A","C","B","D","C","B","A","D","B","B","B","A","B","B","D","A","B","A","D","C","C","D","C","A","C","D","C","A","B","B","A","A","A","D","C","B","C","B","C","D","B","B","D","A","D","B","D","B","C","C","D","D","A","C","C","D","D","D","C","B","A","D","D","B","C","A","B","D","A","D","C","B","A","A","A","C","A","A","A","D","D","A","B","D","C","A","B","C","B","C","A","D","D","C","D","D","A","A","A","C","D","D","A","B","A","C","C","D","C","B","C","B","C","D","C","A","B","D","B","A","A","B","D","C","A","B","B","D"],
     "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
 }
+
+@app.get("/")
+def home():
+    return {"status": "TOEIC AI Server is Running!"}
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
@@ -69,34 +72,33 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # --- [수정된 황금 좌표 구간] ---
-            # 모든 변수 이름을 하나로 통일했습니다.
-            top_margin = h * 0.163
-            row_spacing = h * 0.0422
-            
+            # --- [강사님의 황금 좌표 핵심 로직] ---
             if section_name == "RC":
-                # 강사님의 보정치 적용 + 186/198번 오차 정밀 조정
-                left_margin = w * 0.081      # 186번 해결을 위해 미세 조정
-                current_col_spacing = w * 0.1965 # 198번 해결을 위해 미세 조정
-                current_bubble_width = w * 0.0335
+                # RC 전용 보정치 적용
+                left_margin = w * 0.080
+                current_col_spacing = w * 0.196
+                current_bubble_width = w * 0.033
             else:
-                # LC는 원래 잘 맞던 수치 그대로 유지
+                # LC 전용 보정치 적용
                 left_margin = w * 0.082
                 current_col_spacing = w * 0.201
                 current_bubble_width = w * 0.034
+            
+            top_margin = h * 0.163
+            row_spacing = h * 0.0422
 
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
 
             for col in range(5):
                 for row in range(20):
-                    # 위에서 정의한 변수명과 일치시켰습니다.
+                    # 통합된 변수명(current_col_spacing)을 사용하여 계산
                     base_x = left_margin + (col * current_col_spacing)
                     base_y = top_margin + (row * row_spacing)
                     
                     pixel_counts = []
                     for j in range(4):
-                        # j * current_bubble_width 로 변수명 통일
+                        # 통합된 변수명(current_bubble_width)을 사용하여 계산
                         cx, cy = int(base_x + (j * current_bubble_width)), int(base_y)
                         if 0 <= cx < w and 0 <= cy < h:
                             mask = np.zeros((h, w), dtype="uint8")
@@ -110,7 +112,7 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                     else:
                         total_student_answers.append("?")
 
-        # --- 결과 처리 (기존 로직 유지) ---
+        # --- 결과 처리 로직 ---
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
@@ -135,4 +137,3 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         }
     except Exception as e:
         return {"error": f"서버 오류: {str(e)}"}
-
