@@ -20,21 +20,15 @@ ANSWERS_DB = {
     "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
 }
 
-@app.get("/")
-def home():
-    return {"status": "TOEIC AI Server is Running!"}
-
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
     try:
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is None: return {"error": "이미지 읽기 실패"}
-
+        
         ANSWER_KEY = ANSWERS_DB.get(vol.replace(".", ""), ANSWERS_DB["vol16"])
 
-        # 1. 전처리 및 테두리 검출
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         edged = cv2.Canny(blurred, 75, 200)
@@ -49,9 +43,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             if len(approx) == 4 and cv2.contourArea(c) > 30000:
                 target_regions.append(approx)
                 if len(target_regions) == 2: break
-
-        if len(target_regions) < 2:
-            return {"error": "구역 인식 실패. 테두리를 확인해 주세요."}
 
         target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
         total_student_answers = []
@@ -72,47 +63,44 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # --- [강사님의 황금 좌표 핵심 로직] ---
+            # --- [강사님 코드 100% 복사 수동 설정 구간] ---
             if section_name == "RC":
-                # RC 전용 보정치 적용
                 left_margin = w * 0.080
                 current_col_spacing = w * 0.196
-                current_bubble_width = w * 0.033
+                bubble_width = w * 0.033
             else:
-                # LC 전용 보정치 적용
                 left_margin = w * 0.082
                 current_col_spacing = w * 0.201
-                current_bubble_width = w * 0.034
-            
+                bubble_width = w * 0.034
+                
             top_margin = h * 0.163
             row_spacing = h * 0.0422
+            # ----------------------------------------------
 
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             _, thresh = cv2.threshold(warped_gray, 160, 255, cv2.THRESH_BINARY_INV)
 
             for col in range(5):
                 for row in range(20):
-                    # 통합된 변수명(current_col_spacing)을 사용하여 계산
+                    # 좌표 계산 로직을 강사님 테스트 코드와 완전히 동일하게 수정
                     base_x = left_margin + (col * current_col_spacing)
                     base_y = top_margin + (row * row_spacing)
                     
                     pixel_counts = []
                     for j in range(4):
-                        # 통합된 변수명(current_bubble_width)을 사용하여 계산
-                        cx, cy = int(base_x + (j * current_bubble_width)), int(base_y)
-                        if 0 <= cx < w and 0 <= cy < h:
-                            mask = np.zeros((h, w), dtype="uint8")
-                            cv2.circle(mask, (cx, cy), 6, 255, -1)
-                            pixel_counts.append(cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask)))
-                        else:
-                            pixel_counts.append(0)
+                        cx, cy = int(base_x + (j * bubble_width)), int(base_y)
+                        
+                        mask = np.zeros((h, w), dtype="uint8")
+                        cv2.circle(mask, (cx, cy), 6, 255, -1)
+                        pixel_count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
+                        pixel_counts.append(pixel_count)
 
                     if max(pixel_counts) > 25:
                         total_student_answers.append(labels[np.argmax(pixel_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # --- 결과 처리 로직 ---
+        # 결과 처리
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
