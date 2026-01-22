@@ -40,16 +40,12 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         
         target_regions = []
         for c in cnts:
-            # --- [ValueError 해결 핵심: 사각형 근사화] ---
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            
-            # 만약 점이 4개가 아니면 최소 사각형(박스)으로 강제 변환
             if len(approx) != 4:
                 rect_box = cv2.minAreaRect(c)
                 approx = cv2.boxPoints(rect_box)
                 approx = np.array(approx, dtype="int")
-            
             target_regions.append(approx)
 
         target_regions = sorted(target_regions, key=lambda x: np.mean(x[:, 0, 0]))
@@ -58,7 +54,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
 
         for idx, region in enumerate(target_regions):
             section_name = "LC" if idx == 0 else "RC"
-            
             pts = region.reshape(4, 2)
             rect = np.zeros((4, 2), dtype="float32")
             s = pts.sum(axis=1); rect[0] = pts[np.argmin(s)]; rect[2] = pts[np.argmax(s)]
@@ -71,7 +66,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
             warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
             h, w = warped.shape[:2]
 
-            # 강사님 황금 수치 (RC 181~187 보정값 적용)
             if section_name == "RC":
                 left_margin, current_col_spacing, bubble_width = w*0.083, w*0.198, w*0.034
             else:
@@ -85,7 +79,6 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                 for row in range(20):
                     base_x = left_margin + (col * current_col_spacing)
                     base_y = top_margin + (row * row_spacing)
-                    
                     pixel_counts = []
                     for j in range(4):
                         cx, cy = int(base_x + (j * bubble_width)), int(base_y)
@@ -93,50 +86,46 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
                         cv2.circle(mask, (cx, cy), 7, 255, -1)
                         pixel_count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         pixel_counts.append(pixel_count)
-
                     if max(pixel_counts) > 20:
                         total_student_answers.append(labels[np.argmax(pixel_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # --- [수정된 결과 처리 섹션] ---
+        # --- [가변 채점 로직 적용 구간] ---
         parts_def = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                      ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
         lc_correct, rc_correct, part_details = 0, 0, []
-        
+        db_answer_length = len(ANSWER_KEY) # 현재 선택된 DB의 정답 개수 (est5_1은 100)
+
         for name, start, end in parts_def:
             p_score, p_items = 0, []
             for i in range(start-1, end):
-                if i >= len(total_student_answers): break
+                std = total_student_answers[i] if i < len(total_student_answers) else "?"
                 
-                std = total_student_answers[i]    # 학생이 쓴 답
-                ans = ANSWER_KEY[i]              # 실제 정답
-                corr = (std == ans)
+                # 정답 DB에 해당 번호가 있을 때만 채점
+                if i < db_answer_length:
+                    ans = ANSWER_KEY[i]
+                    corr = (std == ans)
+                else:
+                    ans = "-" # 정답이 없으면 - 처리
+                    corr = False
                 
                 if corr:
                     if i < 100: lc_correct += 1
                     else: rc_correct += 1
                     p_score += 1
                 
-                # 결과 리스트에 정답(ans)을 추가하여 전달합니다.
                 p_items.append({
                     "no": i+1, 
                     "std": std, 
-                    "ans": ans,                  # 정답 데이터 추가
-                    "res": "O" if corr else "X"
+                    "ans": ans, 
+                    "res": "O" if corr else ("-" if ans == "-" else "X")
                 })
             part_details.append({"name": name, "score": p_score, "total": end-start+1, "items": p_items})
 
-        # --- [수정된 점수 환산 로직 적용] ---
-        
-        # 1. LC 환산: (개수 * 5) + 10점 가산, 최대 495점 제한
-        # 단, 0개 맞았을 때는 0점으로 표시 (기본 점수 5점이 필요하면 0 대신 5 설정 가능)
+        # --- [점수 환산 로직] ---
         lc_converted = min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0
-        
-        # 2. RC 환산: (개수 * 5), 최대 495점 제한
         rc_converted = min(rc_correct * 5, 495)
-        
-        # 3. 총합 계산
         total_converted = lc_converted + rc_converted
 
         return {
@@ -149,6 +138,3 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(...)):
         }
     except Exception as e:
         return {"error": f"분석 오류: {str(e)}"}
-
-
-
