@@ -20,29 +20,19 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-ANSWERS_DB = {
-    "vol16": ["C","C","D","A","C","A","B","A","C","A","C","C","A","C","A","B","B","C","A","C","A","A","A","C","A","A","B","A","B","A","A","C","B","A","B","B","A","C","D","C","B","D","C","C","D","A","A","C","B","C","C","A","D","C","D","C","B","D","C","A","A","B","C","A","C","B","C","B","D","D","D","C","A","C","B","D","C","B","A","D","B","B","B","A","B","B","D","A","B","A","D","C","C","D","C","A","C","D","C","A","B","B","A","A","A","D","C","B","C","B","C","D","B","B","D","A","D","B","D","B","C","C","D","D","A","C","C","D","D","D","C","B","A","D","D","B","C","A","B","D","A","D","C","B","A","A","A","C","A","A","A","D","D","A","B","D","C","A","B","C","B","C","A","D","D","C","D","D","A","A","A","C","D","D","A","B","A","C","C","D","C","B","C","B","C","D","C","A","B","D","B","A","A","B","D","C","A","B","B","D"],
-    "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
-}
+# [ANSWERS_DB 생략 - 이전과 동일]
 
-def stabilize_lighting(img):
-    """1단계 정규화 + 2단계 타겟 밝기 고정 알고리즘"""
-    # 그레이스케일 변환
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+def super_enhance(img):
+    """채도와 대비를 극대화하여 연필 자국을 컴싸처럼 만듦"""
+    # 채도 강화
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    s = cv2.add(s, 60) 
+    enhanced = cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
     
-    # 히스토그램 평활화 (대비 강화)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    gray = clahe.apply(gray)
-    
-    # 평균 밝기를 측정하여 특정 레벨(예: 190)로 강제 조정
-    current_brightness = np.mean(gray)
-    target_brightness = 190.0
-    ratio = target_brightness / current_brightness
-    
-    # 밝기 보정 실행 (클리핑 방지 포함)
-    gray = cv2.convertScaleAbs(gray, alpha=ratio, beta=0)
-    
-    return gray
+    # 대비 강화
+    enhanced = cv2.convertScaleAbs(enhanced, alpha=1.6, beta=-40)
+    return enhanced
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
@@ -52,14 +42,15 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None: return {"error": "이미지 읽기 실패"}
 
-        # 정방향 회전
+        # 1. 이미지 선명화 (강사님 수동 보정 효과)
+        image = super_enhance(image)
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        # [핵심] 조명 평형화 처리 (이미 여기서 흑백 변환됨)
-        gray_processed = stabilize_lighting(image)
-
-        # 박스 찾기용 전처리
-        edged = cv2.Canny(cv2.GaussianBlur(gray_processed, (5, 5), 0), 50, 150)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # 2. 가우시안 블러를 줄여 연필의 미세한 질감을 살림
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        edged = cv2.Canny(blurred, 30, 150)
+        
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:2]
         target_regions = sorted(cnts, key=lambda c: cv2.boundingRect(c)[0]) 
@@ -82,18 +73,15 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
             dst_w, dst_h = 800, 600
             dst = np.array([[0, 0], [dst_w-1, 0], [dst_w-1, dst_h-1], [0, dst_h-1]], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
+            warped = cv2.warpPerspective(gray, M, (dst_w, dst_h))
             
-            # 전처리된 gray_processed에서 직접 박스 추출
-            warped = cv2.warpPerspective(gray_processed, M, (dst_w, dst_h))
+            # 3. 연필 마킹용 이진화 (BlockSize는 키우고 C는 줄임)
+            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 7)
             
-            # 연필 마킹 전용 이진화 (가우시안 필터 크기를 키움)
-            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 15)
-            
-            # 연필 자국 보강 (Dilation)
+            # 4. 연필 자국 팽창
             kernel = np.ones((2,2), np.uint8)
             thresh = cv2.dilate(thresh, kernel, iterations=1)
 
-            # 좌표 설정
             l_margin, t_margin = dst_w * 0.0842, dst_h * 0.1635  
             c_gap, r_gap = dst_w * 0.1988, dst_h * 0.0421     
             b_w = dst_w * 0.0342       
@@ -109,41 +97,11 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
                         count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         p_counts.append(count)
                     
-                    # 연필 농도에 맞춰 감도 대폭 하향
-                    if max(p_counts) > 12: 
+                    # 기준치를 10으로 낮춰 흐릿한 연필 포착
+                    if max(p_counts) > 10: 
                         total_student_answers.append(labels[np.argmax(p_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # --- 정답 대조 및 리턴 ---
-        ANSWER_KEY = ["-"] * 200
-        clean_vol = vol.replace(".", "") if vol else "vol16"
-        ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
-
-        lc_correct, rc_correct, part_details = 0, 0, []
-        p_defs = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
-                  ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
-
-        for name, s, e in p_defs:
-            p_score, p_items = 0, []
-            for i in range(s-1, e):
-                std = total_student_answers[i] if i < len(total_student_answers) else "?"
-                ans = ANSWER_KEY[i]
-                corr = (std == ans) if ans != "-" else False
-                if corr:
-                    p_score += 1
-                    if i < 100: lc_correct += 1
-                    else: rc_correct += 1
-                p_items.append({"no": i+1, "std": std, "ans": ans, "res": "O" if corr else "X"})
-            part_details.append({"name": name, "score": p_score, "total": e-s+1, "items": p_items})
-
-        return {
-            "lc_correct": lc_correct, "rc_correct": rc_correct,
-            "lc_converted": min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0,
-            "rc_converted": min(rc_correct * 5, 495),
-            "total_converted": (min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0) + min(rc_correct * 5, 495),
-            "part_details": part_details
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
+        # [정답 대조 로직 및 리턴 - 이전과 동일]
+        # ...
