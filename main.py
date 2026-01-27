@@ -3,7 +3,6 @@ import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import io
-import os
 
 # [확인] answers.py 파일 연동
 try:
@@ -43,21 +42,18 @@ async def analyze_image(
 
         # 1. 전처리: 왼쪽 90도 회전
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        img_h, img_w = image.shape[:2]
 
-        # 2. 박스 검출 최적화 (가장 큰 사각형 2개)
+        # 2. 박스 검출 (가장 큰 사각형 2개)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:2]
-        target_regions = sorted(cnts, key=lambda c: cv2.boundingRect(c)[0]) # 왼쪽부터 LC, RC
+        target_regions = sorted(cnts, key=lambda c: cv2.boundingRect(c)[0]) 
 
         total_student_answers = []
         labels = ["A", "B", "C", "D"]
-        debug_views = [] # 디버깅용 이미지 저장
 
         for idx, c in enumerate(target_regions):
-            # 원근 보정 (Perspective Transform)
             peri = cv2.arcLength(c, True)
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
             if len(approx) != 4:
@@ -74,12 +70,68 @@ async def analyze_image(
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
             
-            # 음영 극복 (Adaptive Threshold 강화)
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             thresh = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5)
 
-            # [수정] 강사님 답안지 맞춤형 정밀 좌표 (145~149번 및 하단 밀림 보정)
-            l_margin = dst_w * 0.0845  # 좌측 여백 미세 조정
-            t_margin = dst_h * 0.1635  # 상단 여백 미세 조정
-            c_gap = dst_w * 0.1985     # 열 간격 정밀 조정
-            r_gap = dst_h * 0.042
+            # [정밀 보정] 145~149번 및 하단 밀림 현상 저격 수치
+            l_margin = dst_w * 0.0845  
+            t_margin = dst_h * 0.1635  
+            c_gap = dst_w * 0.1985     
+            r_gap = dst_h * 0.0421     
+            b_w = dst_w * 0.0342       
+
+            for col in range(5):
+                for row in range(20):
+                    bx = l_margin + (col * c_gap)
+                    by = t_margin + (row * r_gap)
+                    p_counts = []
+                    for j in range(4):
+                        cx, cy = int(bx + (j * b_w)), int(by)
+                        mask = np.zeros((dst_h, dst_w), dtype="uint8")
+                        cv2.circle(mask, (cx, cy), 6, 255, -1) 
+                        count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
+                        p_counts.append(count)
+
+                    if max(p_counts) > 22:
+                        total_student_answers.append(labels[np.argmax(p_counts)])
+                    else:
+                        total_student_answers.append("?")
+
+        # 3. 정답 대조 및 채점
+        ANSWER_KEY = ["-"] * 200
+        if textbook and textbook in ETS_DATA:
+            if lc_round != "none":
+                lc_ans = ETS_DATA[textbook]["LC"].get(lc_round, [])
+                ANSWER_KEY[0:len(lc_ans)] = lc_ans
+            if rc_round != "none":
+                rc_ans = ETS_DATA[textbook]["RC"].get(rc_round, [])
+                ANSWER_KEY[100:100+len(rc_ans)] = rc_ans
+        elif vol:
+            ANSWER_KEY = ANSWERS_DB.get(vol.replace(".",""), ANSWERS_DB["vol16"])
+
+        lc_correct, rc_correct, part_details = 0, 0, []
+        p_defs = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
+                  ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
+
+        for name, s, e in p_defs:
+            p_score, p_items = 0, []
+            for i in range(s-1, e):
+                std = total_student_answers[i] if i < len(total_student_answers) else "?"
+                ans = ANSWER_KEY[i]
+                corr = (std == ans) if ans != "-" else False
+                if corr:
+                    p_score += 1
+                    if i < 100: lc_correct += 1
+                    else: rc_correct += 1
+                p_items.append({"no": i+1, "std": std, "ans": ans, "res": "O" if corr else ("-" if ans == "-" else "X")})
+            part_details.append({"name": name, "score": p_score, "total": e-s+1, "items": p_items})
+
+        return {
+            "lc_converted": min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0,
+            "rc_converted": min(rc_correct * 5, 495),
+            "total_converted": (min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0) + min(rc_correct * 5, 495),
+            "part_details": part_details
+        }
+
+    except Exception as e:
+        return {"error": str(e)} # 여기서 try-except 구문이 완벽하게 닫힙니다.
