@@ -21,7 +21,6 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-# [유지] 기존 vol 정답 데이터
 ANSWERS_DB = {
     "vol16": ["C","C","D","A","C","A","B","A","C","A","C","C","A","C","A","B","B","C","A","C","A","A","A","C","A","A","B","A","B","A","A","C","B","A","B","B","A","C","D","C","B","D","C","C","D","A","A","C","B","C","C","A","D","C","D","C","B","D","C","A","A","B","C","A","C","B","C","B","D","D","D","C","A","C","B","D","C","B","A","D","B","B","B","A","B","B","D","A","B","A","D","C","C","D","C","A","C","D","C","A","B","B","A","A","A","D","C","B","C","B","C","D","B","B","D","A","D","B","D","B","C","C","D","D","A","C","C","D","D","D","C","B","A","D","D","B","C","A","B","D","A","D","C","B","A","A","A","C","A","A","A","D","D","A","B","D","C","A","B","C","B","C","A","D","D","C","D","D","A","A","A","C","D","D","A","B","A","C","C","D","C","B","C","B","C","D","C","A","B","D","B","A","A","B","D","C","A","B","B","D"],
     "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
@@ -38,10 +37,8 @@ async def analyze_image(
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None: return {"error": "이미지 읽기 실패"}
 
-        # 1. 원본 가로 촬영본을 왼쪽 90도 회전하여 정방향 세로 이미지로 인식 시작
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        # 2. 박스 검출 및 원근 보정
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -63,43 +60,42 @@ async def analyze_image(
             s = approx.sum(axis=1); rect[0] = approx[np.argmin(s)]; rect[2] = approx[np.argmax(s)]
             diff = np.diff(approx, axis=1); rect[1] = approx[np.argmin(diff)]; rect[3] = approx[np.argmax(diff)]
 
-            # 가로 800 x 세로 600 표준 규격화
             dst_w, dst_h = 800, 600
             dst = np.array([[0, 0], [dst_w-1, 0], [dst_w-1, dst_h-1], [0, dst_h-1]], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
             
+            # [연필 마킹 특화 전처리]
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-            thresh = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5)
+            # Adaptive 수치를 31, 10으로 조정하여 어두운 구역(RC)의 연필자국 강조
+            thresh = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 10)
+            
+            # 모폴로지 팽창으로 연필 자국 굵게 만들기
+            kernel = np.ones((2,2), np.uint8)
+            thresh = cv2.dilate(thresh, kernel, iterations=1)
 
-            # [핵심 보정 수치] 85번 문항 정밀 타격을 위한 좌표 튜닝
-            l_margin = dst_w * 0.0842  
-            t_margin = dst_h * 0.1635  
-            c_gap = dst_w * 0.1988     # 5열(85번 포함) 인식을 위해 미세하게 우측 이동
-            r_gap = dst_h * 0.0421     
+            l_margin, t_margin = dst_w * 0.0842, dst_h * 0.1635  
+            c_gap, r_gap = dst_w * 0.1988, dst_h * 0.0421     
             b_w = dst_w * 0.0342       
 
             for col in range(5):
                 for row in range(20):
-                    bx = l_margin + (col * c_gap)
-                    by = t_margin + (row * r_gap)
+                    bx, by = l_margin + (col * c_gap), t_margin + (row * r_gap)
                     p_counts = []
                     for j in range(4):
                         cx, cy = int(bx + (j * b_w)), int(by)
                         mask = np.zeros((dst_h, dst_w), dtype="uint8")
-                        
-                        # [85번 저격] 샘플링 반지름을 8로 키워 포착 범위 극대화
                         cv2.circle(mask, (cx, cy), 8, 255, -1) 
-                        
                         count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         p_counts.append(count)
                     
-                    if max(p_counts) > 25: 
+                    # 연필 마킹은 픽셀 수가 적을 수 있으므로 기준을 18로 하향 조정
+                    if max(p_counts) > 18: 
                         total_student_answers.append(labels[np.argmax(p_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # 3. 채점 로직 및 아임웹 연동 데이터 생성
+        # --- 정답 대조 및 리턴 (기존 동일) ---
         ANSWER_KEY = ["-"] * 200
         clean_vol = vol.replace(".", "") if vol else "vol16"
         ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
@@ -125,10 +121,8 @@ async def analyze_image(
         rc_conv = min(rc_correct * 5, 495)
 
         return {
-            "lc_correct": lc_correct,   # 아임웹 undefined 방지
-            "rc_correct": rc_correct,   # 아임웹 undefined 방지
-            "lc_converted": lc_conv,
-            "rc_converted": rc_conv,
+            "lc_correct": lc_correct, "rc_correct": rc_correct,
+            "lc_converted": lc_conv, "rc_converted": rc_conv,
             "total_converted": lc_conv + rc_conv,
             "part_details": part_details
         }
