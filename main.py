@@ -4,7 +4,6 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import io
 
-# [확인] answers.py 파일 연동
 try:
     from answers import ETS_DATA
 except ImportError:
@@ -26,21 +25,41 @@ ANSWERS_DB = {
     "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
 }
 
+def stabilize_lighting(img):
+    """1단계 정규화 + 2단계 타겟 밝기 고정 알고리즘"""
+    # 그레이스케일 변환
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # 히스토그램 평활화 (대비 강화)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gray = clahe.apply(gray)
+    
+    # 평균 밝기를 측정하여 특정 레벨(예: 190)로 강제 조정
+    current_brightness = np.mean(gray)
+    target_brightness = 190.0
+    ratio = target_brightness / current_brightness
+    
+    # 밝기 보정 실행 (클리핑 방지 포함)
+    gray = cv2.convertScaleAbs(gray, alpha=ratio, beta=0)
+    
+    return gray
+
 @app.post("/analyze")
-async def analyze_image(
-    file: UploadFile = File(...), 
-    vol: str = Form(None)
-):
+async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
     try:
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None: return {"error": "이미지 읽기 실패"}
 
+        # 정방향 회전
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+        # [핵심] 조명 평형화 처리 (이미 여기서 흑백 변환됨)
+        gray_processed = stabilize_lighting(image)
+
+        # 박스 찾기용 전처리
+        edged = cv2.Canny(cv2.GaussianBlur(gray_processed, (5, 5), 0), 50, 150)
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:2]
         target_regions = sorted(cnts, key=lambda c: cv2.boundingRect(c)[0]) 
@@ -63,17 +82,18 @@ async def analyze_image(
             dst_w, dst_h = 800, 600
             dst = np.array([[0, 0], [dst_w-1, 0], [dst_w-1, dst_h-1], [0, dst_h-1]], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
-            warped = cv2.warpPerspective(image, M, (dst_w, dst_h))
             
-            # [연필 마킹 특화 전처리]
-            warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-            # Adaptive 수치를 31, 10으로 조정하여 어두운 구역(RC)의 연필자국 강조
-            thresh = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 10)
+            # 전처리된 gray_processed에서 직접 박스 추출
+            warped = cv2.warpPerspective(gray_processed, M, (dst_w, dst_h))
             
-            # 모폴로지 팽창으로 연필 자국 굵게 만들기
+            # 연필 마킹 전용 이진화 (가우시안 필터 크기를 키움)
+            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 15)
+            
+            # 연필 자국 보강 (Dilation)
             kernel = np.ones((2,2), np.uint8)
             thresh = cv2.dilate(thresh, kernel, iterations=1)
 
+            # 좌표 설정
             l_margin, t_margin = dst_w * 0.0842, dst_h * 0.1635  
             c_gap, r_gap = dst_w * 0.1988, dst_h * 0.0421     
             b_w = dst_w * 0.0342       
@@ -89,13 +109,13 @@ async def analyze_image(
                         count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         p_counts.append(count)
                     
-                    # 연필 마킹은 픽셀 수가 적을 수 있으므로 기준을 18로 하향 조정
-                    if max(p_counts) > 18: 
+                    # 연필 농도에 맞춰 감도 대폭 하향
+                    if max(p_counts) > 12: 
                         total_student_answers.append(labels[np.argmax(p_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # --- 정답 대조 및 리턴 (기존 동일) ---
+        # --- 정답 대조 및 리턴 ---
         ANSWER_KEY = ["-"] * 200
         clean_vol = vol.replace(".", "") if vol else "vol16"
         ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
@@ -117,13 +137,11 @@ async def analyze_image(
                 p_items.append({"no": i+1, "std": std, "ans": ans, "res": "O" if corr else "X"})
             part_details.append({"name": name, "score": p_score, "total": e-s+1, "items": p_items})
 
-        lc_conv = min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0
-        rc_conv = min(rc_correct * 5, 495)
-
         return {
             "lc_correct": lc_correct, "rc_correct": rc_correct,
-            "lc_converted": lc_conv, "rc_converted": rc_conv,
-            "total_converted": lc_conv + rc_conv,
+            "lc_converted": min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0,
+            "rc_converted": min(rc_correct * 5, 495),
+            "total_converted": (min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0) + min(rc_correct * 5, 495),
             "part_details": part_details
         }
 
