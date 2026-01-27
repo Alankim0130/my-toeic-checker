@@ -29,10 +29,7 @@ ANSWERS_DB = {
 @app.post("/analyze")
 async def analyze_image(
     file: UploadFile = File(...), 
-    vol: str = Form(None),       
-    textbook: str = Form(None),  
-    lc_round: str = Form(None),  
-    rc_round: str = Form(None)
+    vol: str = Form(None)
 ):
     try:
         contents = await file.read()
@@ -40,10 +37,7 @@ async def analyze_image(
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None: return {"error": "이미지 읽기 실패"}
 
-        # 1. 전처리: 왼쪽 90도 회전
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-        # 2. 박스 검출 (가장 큰 사각형 2개)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         edged = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -73,8 +67,8 @@ async def analyze_image(
             warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
             thresh = cv2.adaptiveThreshold(warped_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5)
 
-            # [정밀 보정] 145~149번 및 하단 밀림 현상 저격 수치
-            l_margin = dst_w * 0.0845  
+            # [85번 최종 정밀 보정]
+            l_margin = dst_w * 0.0842  # 0.0845 -> 0.0842 보정
             t_margin = dst_h * 0.1635  
             c_gap = dst_w * 0.1985     
             r_gap = dst_h * 0.0421     
@@ -91,23 +85,16 @@ async def analyze_image(
                         cv2.circle(mask, (cx, cy), 6, 255, -1) 
                         count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         p_counts.append(count)
-
+                    
                     if max(p_counts) > 22:
                         total_student_answers.append(labels[np.argmax(p_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # 3. 정답 대조 및 채점
+        # --- 정답 대조 및 채점 ---
         ANSWER_KEY = ["-"] * 200
-        if textbook and textbook in ETS_DATA:
-            if lc_round != "none":
-                lc_ans = ETS_DATA[textbook]["LC"].get(lc_round, [])
-                ANSWER_KEY[0:len(lc_ans)] = lc_ans
-            if rc_round != "none":
-                rc_ans = ETS_DATA[textbook]["RC"].get(rc_round, [])
-                ANSWER_KEY[100:100+len(rc_ans)] = rc_ans
-        elif vol:
-            ANSWER_KEY = ANSWERS_DB.get(vol.replace(".",""), ANSWERS_DB["vol16"])
+        clean_vol = vol.replace(".", "") if vol else "vol16"
+        ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
 
         lc_correct, rc_correct, part_details = 0, 0, []
         p_defs = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
@@ -123,15 +110,21 @@ async def analyze_image(
                     p_score += 1
                     if i < 100: lc_correct += 1
                     else: rc_correct += 1
-                p_items.append({"no": i+1, "std": std, "ans": ans, "res": "O" if corr else ("-" if ans == "-" else "X")})
+                p_items.append({"no": i+1, "std": std, "ans": ans, "res": "O" if corr else "X"})
             part_details.append({"name": name, "score": p_score, "total": e-s+1, "items": p_items})
 
+        lc_conv = min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0
+        rc_conv = min(rc_correct * 5, 495)
+
+        # 아임웹 자바스크립트가 기대하는 키값 매칭
         return {
-            "lc_converted": min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0,
-            "rc_converted": min(rc_correct * 5, 495),
-            "total_converted": (min((lc_correct * 5) + 10, 495) if lc_correct > 0 else 0) + min(rc_correct * 5, 495),
+            "lc_correct": lc_correct,   # 아임웹 화면 노출용
+            "rc_correct": rc_correct,   # 아임웹 화면 노출용
+            "lc_converted": lc_conv,
+            "rc_converted": rc_conv,
+            "total_converted": lc_conv + rc_conv,
             "part_details": part_details
         }
 
     except Exception as e:
-        return {"error": str(e)} # 여기서 try-except 구문이 완벽하게 닫힙니다.
+        return {"error": str(e)}
