@@ -17,12 +17,12 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 # ====== Debug storage (동시 사용자 안전) ======
 DEBUG_DIR = "debug"
-DEBUG_TTL_SECONDS = 60 * 10  # 10분 후 자동 정리 (원하면 늘리기)
+DEBUG_TTL_SECONDS = 60 * 10  # 10분 후 자동 정리
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 def cleanup_old_debug_files():
-    """TTL 지난 디버그 파일 자동 삭제 (간단 정리)"""
+    """TTL 지난 디버그 파일 자동 삭제"""
     now = time.time()
     try:
         for fn in os.listdir(DEBUG_DIR):
@@ -36,6 +36,31 @@ def cleanup_old_debug_files():
                 pass
     except Exception:
         pass
+
+# ====== (추가) 디버그 이미지 밝기 통일 ======
+def normalize_debug_view(bgr: np.ndarray) -> np.ndarray:
+    """
+    디버그 이미지를 '밝은 느낌'으로 통일:
+    - LAB의 L 채널 오토레벨(2~98%) + CLAHE + 감마(0.90)
+    """
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    L, A, B = cv2.split(lab)
+
+    lo, hi = np.percentile(L, (2, 98))
+    if hi - lo < 1:
+        hi = lo + 1
+    L = np.clip(L, lo, hi)
+    L = ((L - lo) / (hi - lo) * 255).astype(np.uint8)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    L = clahe.apply(L)
+
+    gamma = 0.90  # 더 밝게: 0.85~0.95 조절 가능
+    lut = np.array([((i / 255.0) ** gamma) * 255 for i in range(256)]).astype("uint8")
+    L = cv2.LUT(L, lut)
+
+    lab = cv2.merge([L, A, B])
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 # ====== Geometry utils ======
 def order_points(pts: np.ndarray) -> np.ndarray:
@@ -137,11 +162,19 @@ def make_thresh_for_marks(warped_gray: np.ndarray) -> np.ndarray:
     th = cv2.dilate(th, np.ones((2, 2), np.uint8), iterations=1)
     return th
 
-def pick_choice_from_counts(counts, min_pixels=22, ratio=1.25):
+# ====== (수정) r=13에 맞춘 자동 min_pixels ======
+def pick_choice_from_counts(counts, r: int, ratio=1.25):
+    """
+    r이 커지면 count도 커지므로 min_pixels를 r 기반으로 자동 설정
+    - r=13이면 대략 37 정도가 기준
+    """
+    min_pixels = int(0.07 * np.pi * r * r)  # r=13 -> 약 37
+
     best = int(np.max(counts))
     idx = int(np.argmax(counts))
     sorted_counts = sorted([int(x) for x in counts])
     second = sorted_counts[-2] if len(sorted_counts) >= 2 else 0
+
     if best >= min_pixels and (best / (second + 1)) >= ratio:
         return idx
     return None
@@ -163,7 +196,7 @@ def get_debug_image(debug_id: str):
 async def analyze_image(
     file: UploadFile = File(...),
     vol: str = Form(None),
-    debug: int = Form(1)  # 학생용도 링크가 필요하면 1 유지 / 끄려면 0
+    debug: int = Form(1)
 ):
     try:
         cleanup_old_debug_files()
@@ -210,7 +243,11 @@ async def analyze_image(
             warped_gray, warped_bgr = warp_region(chosen_gray, chosen_bgr, rect, dst_w=800, dst_h=600)
             th = make_thresh_for_marks(warped_gray)
 
-            vis = warped_bgr.copy()
+            # ✅ (추가) 디버그 시각화용 밝기 통일
+            if debug:
+                vis = normalize_debug_view(warped_bgr)
+            else:
+                vis = warped_bgr.copy()
 
             dst_w, dst_h = 800, 600
             l_margin = dst_w * 0.0842
@@ -219,7 +256,8 @@ async def analyze_image(
             r_gap = dst_h * 0.0421
             b_w = dst_w * 0.0342
 
-            r = 10
+            # ✅ r 최종: 13
+            r = 13
 
             for col in range(5):
                 for row in range(20):
@@ -228,6 +266,7 @@ async def analyze_image(
 
                     counts = []
                     centers = []
+
                     for j in range(4):
                         cx = int(bx + (j * b_w))
                         cy = int(by)
@@ -239,9 +278,12 @@ async def analyze_image(
                         counts.append(cnt)
 
                         if debug:
+                            # ✅ 빨간 점 -> 버블 크기 원으로 표시
+                            cv2.circle(vis, (cx, cy), r, (0, 0, 255), 2)
                             cv2.circle(vis, (cx, cy), 2, (0, 0, 255), -1)
 
-                    choice = pick_choice_from_counts(counts, min_pixels=22, ratio=1.25)
+                    # ✅ r=13 기준 자동 min_pixels 사용
+                    choice = pick_choice_from_counts(counts, r=r, ratio=1.25)
 
                     if choice is None:
                         student_all_ans.append("?")
@@ -249,7 +291,8 @@ async def analyze_image(
                         student_all_ans.append(labels[choice])
                         if debug:
                             sx, sy = centers[choice]
-                            cv2.circle(vis, (sx, sy), 8, (0, 255, 0), 2)
+                            # ✅ 초록 원도 버블 크기에 맞게
+                            cv2.circle(vis, (sx, sy), r + 2, (0, 255, 0), 3)
 
             if debug:
                 debug_views.append(vis)
@@ -261,7 +304,6 @@ async def analyze_image(
             debug_id = uuid.uuid4().hex
             debug_path = os.path.join(DEBUG_DIR, f"debug_{debug_id}.jpg")
             cv2.imwrite(debug_path, np.hstack(debug_views))
-            # 같은 도메인 기준 상대 URL
             debug_url = f"/get-debug-image/{debug_id}"
 
         clean_vol = (vol.replace(".", "") if vol else "vol16").strip()
@@ -318,7 +360,6 @@ async def analyze_image(
             "rc_converted": rc_converted,
             "total_converted": total_converted,
             "part_details": part_details,
-            # ✅ 디버그 링크 정보 (프론트가 이걸로 URL 만들면 됨)
             "debug_id": debug_id,
             "debug_url": debug_url
         }
