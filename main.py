@@ -26,17 +26,27 @@ ANSWERS_DB = {
     "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
 }
 
-def super_enhance(img):
-    """강사님이 수동으로 하셨던 채도/대비 보정을 자동화"""
-    # HSV 변환 후 채도(S) 대폭 강화
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-    s = cv2.add(s, 60) # 채도 대폭 증가
-    enhanced = cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
+def adaptive_lighting_balance(img):
+    """지능형 조명 밸런싱: 어두운 곳만 골라서 밝게 만듦"""
+    # 1. 감마 보정을 통해 이미지의 동적 범위 확보
+    # 전체 이미지의 평균 밝기를 계산하여 감마값 자동 결정
+    mid = 0.5
+    mean = np.mean(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)) / 255
+    gamma = np.log(mid) / np.log(mean)
     
-    # 대비(Contrast)를 높여 연필의 흐릿함을 진하게 변경
-    enhanced = cv2.convertScaleAbs(enhanced, alpha=1.6, beta=-40)
-    return enhanced
+    invGamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+    img = cv2.LUT(img, table)
+    
+    # 2. CLAHE (적응형 히스토그램 평활화)를 통해 국소적 대비 강화
+    # 이미 밝은 곳은 놔두고, 어두운 곳의 대비만 끌어올림
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(12,12)) # 타일 크기를 키워 자연스럽게 보정
+    l = clahe.apply(l)
+    img = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+    
+    return img
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
@@ -46,13 +56,13 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if image is None: return {"error": "이미지 읽기 실패"}
 
-        # 1. 이미지 선명화 보정 적용
-        image = super_enhance(image)
+        # [핵심] 학생별 촬영 환경 맞춤형 보정 적용
+        image = adaptive_lighting_balance(image)
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        edged = cv2.Canny(blurred, 30, 150)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edged = cv2.Canny(blurred, 50, 150)
         
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:2]
@@ -78,10 +88,8 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
             M = cv2.getPerspectiveTransform(rect, dst)
             warped = cv2.warpPerspective(gray, M, (dst_w, dst_h))
             
-            # 연필 마킹 인식 감도 조절
-            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 7)
-            kernel = np.ones((2,2), np.uint8)
-            thresh = cv2.dilate(thresh, kernel, iterations=1)
+            # 연필 마킹 포착을 위해 가우시안 임계값 미세 조정
+            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 8)
 
             l_margin, t_margin = dst_w * 0.0842, dst_h * 0.1635  
             c_gap, r_gap = dst_w * 0.1988, dst_h * 0.0421     
@@ -98,17 +106,17 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
                         count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         p_counts.append(count)
                     
-                    if max(p_counts) > 10:
+                    # 수동 보정에서 효과가 좋았던 기준값 25 전후로 세팅
+                    if max(p_counts) > 22: 
                         total_student_answers.append(labels[np.argmax(p_counts)])
                     else:
                         total_student_answers.append("?")
 
-        # --- 정답 대조 로직 ---
-        ANSWER_KEY = ["-"] * 200
+        # --- 정답 대조 및 리턴 ---
+        lc_correct, rc_correct, part_details = 0, 0, []
         clean_vol = vol.replace(".", "") if vol else "vol16"
         ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
-
-        lc_correct, rc_correct, part_details = 0, 0, []
+        
         p_defs = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                   ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
 
@@ -133,4 +141,4 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
             "part_details": part_details
         }
     except Exception as e:
-        return {"error": str(e)} # 여기서 짝이 완벽하게 맞습니다.
+        return {"error": str(e)}
