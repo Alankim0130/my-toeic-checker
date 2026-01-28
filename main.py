@@ -3,8 +3,8 @@ import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import io
+import os
 
-# [필독] 정답 데이터베이스 - 이제 절대 누락되지 않습니다.
 ANSWERS_DB = {
     "vol16": ["C","C","D","A","C","A","B","A","C","A","C","C","A","C","A","B","B","C","A","C","A","A","A","C","A","A","B","A","B","A","A","C","B","A","B","B","A","C","D","C","B","D","C","C","D","A","A","C","B","C","C","A","D","C","D","C","B","D","C","A","A","B","C","A","C","B","C","B","D","D","D","C","A","C","B","D","C","B","A","D","B","B","B","A","B","B","D","A","B","A","D","C","C","D","C","A","C","D","C","A","B","B","A","A","A","D","C","B","C","B","C","D","B","B","D","A","D","B","D","B","C","C","D","D","A","C","C","D","D","D","C","B","A","D","D","B","C","A","B","D","A","D","C","B","A","A","A","C","A","A","A","D","D","A","B","D","C","A","B","C","B","C","A","D","D","C","D","D","A","A","A","C","D","D","A","B","A","C","C","D","C","B","C","B","C","D","C","A","B","D","B","A","A","B","D","C","A","B","B","D"],
     "vol17": ["D","A","A","B","C","A","C","B","C","B","C","B","B","C","B","A","B","B","A","B","B","B","C","B","A","C","B","A","B","B","A","C","B","A","D","A","A","B","C","D","B","C","A","A","D","C","D","B","C","B","A","C","A","B","B","C","B","D","D","C","A","A","D","D","D","C","A","B","A","B","A","C","B","A","B","C","D","C","B","D","C","A","B","C","A","D","C","C","B","C","D","D","C","A","C","B","D","D","C","C","C","A","D","C","A","A","B","D","B","D","B","A","C","B","D","A","B","C","A","A","B","D","B","C","B","C","A","D","C","C","A","A","D","D","A","B","B","C","B","C","A","C","D","C","D","C","D","B","D","A","D","A","D","C","C","A","C","C","D","B","C","B","D","A","C","D","B","C","D","C","A","C","B","A","B","B","D","B","A","C","B","D","D","C","C","A","C","A","B","D","A","B","B","A","D","C","A","C","B","A"]
@@ -13,21 +13,17 @@ ANSWERS_DB = {
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def smart_shadow_recovery(img):
-    """지능형 섀도우 복원: 강사님이 직접 채도/밝기를 만진 것과 같은 효과"""
-    # 흑백 변환 후 국소 대비 강화 (어두운 곳 위주로 대비 상승)
+def advanced_process(img):
+    """이미지 분석 최적화: CLAHE + Adaptive Normalization"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(12,12)) # RC 영역 저격 수치
+    # 국소 대비 강화 (그림자 구역 연필 자국 부각)
+    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(10,10))
     gray = clahe.apply(gray)
-    
-    # 조명 맵 생성: 평균보다 어두운 영역을 찾아 1.5배 밝게 보정
-    blur_gray = cv2.GaussianBlur(gray, (61, 61), 0)
-    mean_val = np.mean(blur_gray)
-    shadow_mask = cv2.threshold(blur_gray, mean_val, 255, cv2.THRESH_BINARY_INV)[1].astype(float) / 255.0
-    
-    # 결과 합성: 어두운 부분만 선택적 보정
-    result = gray.astype(float) + (shadow_mask * gray.astype(float) * 0.5)
-    return np.clip(result, 0, 255).astype(np.uint8)
+    # 밝기 정규화 (전체 조명 평준화)
+    min_val, max_val = np.percentile(gray, (1, 99))
+    gray = np.clip(gray, min_val, max_val)
+    gray = ((gray - min_val) / (max_val - min_val) * 255).astype(np.uint8)
+    return gray
 
 @app.post("/analyze")
 async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
@@ -36,18 +32,19 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
         nparr = np.frombuffer(contents, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # 1. 지능형 전처리 및 정방향 회전
-        gray_balanced = smart_shadow_recovery(image)
-        gray_balanced = cv2.rotate(gray_balanced, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        # 1. 전처리 및 회전
+        image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        gray_processed = advanced_process(image)
 
-        # 2. 박스 및 그리드 추출
-        edged = cv2.Canny(cv2.GaussianBlur(gray_balanced, (5, 5), 0), 30, 150)
+        # 2. 박스 검출
+        edged = cv2.Canny(cv2.GaussianBlur(gray_processed, (5, 5), 0), 30, 150)
         cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:2]
         target_regions = sorted(cnts, key=lambda c: cv2.boundingRect(c)[0])
 
         student_all_ans = []
         labels = ["A", "B", "C", "D"]
+        debug_views = [] # 시각화용 이미지 저장
 
         for idx, c in enumerate(target_regions):
             peri = cv2.arcLength(c, True)
@@ -61,12 +58,14 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
 
             dst_w, dst_h = 800, 600
             M = cv2.getPerspectiveTransform(rect, np.array([[0,0],[dst_w-1,0],[dst_w-1,dst_h-1],[0,dst_h-1]], dtype="float32"))
-            warped = cv2.warpPerspective(gray_balanced, M, (dst_w, dst_h))
+            warped = cv2.warpPerspective(gray_processed, M, (dst_w, dst_h))
+            warped_color = cv2.warpPerspective(cv2.cvtColor(gray_processed, cv2.COLOR_GRAY2BGR), M, (dst_w, dst_h))
             
-            # 3. 연필 마킹 전용 고감도 판독
-            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 61, 4)
+            # 연필 저격용 이진화 및 팽창
+            thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 4)
+            thresh = cv2.dilate(thresh, np.ones((2,2), np.uint8), iterations=1)
 
-            # 검증된 정밀 좌표 수치 (85번 해결값 유지)
+            # 정밀 좌표 (0.1988 보정 유지)
             l_margin, t_margin = dst_w * 0.0842, dst_h * 0.1635  
             c_gap, r_gap = dst_w * 0.1988, dst_h * 0.0421     
             b_w = dst_w * 0.0342       
@@ -77,18 +76,29 @@ async def analyze_image(file: UploadFile = File(...), vol: str = Form(None)):
                     p_counts = []
                     for j in range(4):
                         cx, cy = int(bx + (j * b_w)), int(by)
+                        # [디버깅] AI가 보는 지점에 빨간 점 표시
+                        cv2.circle(warped_color, (cx, cy), 2, (0, 0, 255), -1)
+                        
                         mask = np.zeros((dst_h, dst_w), dtype="uint8")
-                        cv2.circle(mask, (cx, cy), 10, 255, -1) # 원 지름을 10으로 키워 포착력 상승
+                        cv2.circle(mask, (cx, cy), 10, 255, -1)
                         count = cv2.countNonZero(cv2.bitwise_and(thresh, thresh, mask=mask))
                         p_counts.append(count)
                     
-                    if max(p_counts) > 15: student_all_ans.append(labels[np.argmax(p_counts)])
-                    else: student_all_ans.append("?")
+                    if max(p_counts) > 15: 
+                        student_all_ans.append(labels[np.argmax(p_counts)])
+                        # [디버깅] 마킹으로 인식한 곳에 초록 원 표시
+                        sel_x = int(bx + (np.argmax(p_counts) * b_w))
+                        cv2.circle(warped_color, (sel_x, int(by)), 7, (0, 255, 0), 2)
+                    else:
+                        student_all_ans.append("?")
+            debug_views.append(warped_color)
 
-        # 4. 아임웹 상세 내역(part_details) 생성 - forEach 에러 방지
+        # 디버깅 결과물 저장
+        cv2.imwrite("debug_result.jpg", np.hstack(debug_views))
+
+        # 채점 및 리턴 로직
         clean_vol = vol.replace(".", "") if vol else "vol16"
         ANSWER_KEY = ANSWERS_DB.get(clean_vol, ANSWERS_DB["vol16"])
-        
         lc_correct, rc_correct, part_details = 0, 0, []
         p_defs = [("Part 1", 1, 6), ("Part 2", 7, 31), ("Part 3", 32, 70), ("Part 4", 71, 100),
                   ("Part 5", 101, 130), ("Part 6", 131, 146), ("Part 7", 147, 200)]
